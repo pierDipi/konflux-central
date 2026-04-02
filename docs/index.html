@@ -1,0 +1,1030 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RHOAI Konflux Build Status</title>
+<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png">
+<link rel="icon" type="image/x-icon" href="favicon.ico">
+<link rel="manifest" href="site.webmanifest">
+<style>
+    body { font-family: "Segoe UI", Roboto, sans-serif; background-color: #f9fafb; margin: 20px; }
+    #build-status-table { width: 100%; border-collapse: collapse; }
+    #build-status-table th, #build-status-table td { padding: 6px; text-align: left; }
+    #build-status-table thead { position: sticky; top: 0; background: #f1f1f1; z-index: 2; }
+    .success-row { background-color: #cbe5d1 !important; }
+    .failure-row { background-color: #e3babe !important; }
+    .rebuild-needed { background-color: #fff3cd !important; }
+    .pin-mismatch { background-color: #fff3cd; }
+    button { cursor: pointer; background: #4596ed; border: none; color: white; border-radius: 10px; padding: 10px 15px; font-size: 14px; margin-right: 15px; transition: 0.2s; min-width: 100px; }
+    button:hover { background: #0056b3; }
+    #controls { margin-bottom: 15px; }
+    input[type="password"], input[type="text"] { padding: 5px; border: 1px solid #ccc; border-radius: 4px; }
+    #progress { margin: 10px 0; font-size: 14px; color: #555; }
+    #progress:empty { display: none; }
+    #repo-filter { display: flex; flex-wrap: wrap; gap: 4px 12px; max-height: 200px; overflow-y: auto; border: 1px solid #ccc; border-radius: 4px; padding: 8px; background: #fff; }
+    #repo-filter label { font-size: 13px; white-space: nowrap; cursor: pointer; }
+    #repo-filter-controls { margin-bottom: 4px; }
+    #repo-filter-controls button { min-width: auto; padding: 4px 10px; font-size: 12px; border-radius: 6px; }
+
+    /* Toast notifications */
+    #toast-container { position: fixed; top: 20px; right: 20px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; }
+    .toast { padding: 12px 20px; border-radius: 8px; color: #fff; font-size: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); animation: toast-in 0.3s ease, toast-out 0.3s ease forwards; opacity: 0; max-width: 400px; }
+    .toast-success { background: #2e7d32; }
+    .toast-error { background: #c62828; }
+    .toast-info { background: #1565c0; }
+    .toast-warn { background: #e65100; }
+    @keyframes toast-in { from { opacity: 0; transform: translateX(40px); } to { opacity: 1; transform: translateX(0); } }
+    @keyframes toast-out { from { opacity: 1; } to { opacity: 0; } }
+
+    /* Modal */
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 10000; display: flex; align-items: center; justify-content: center; }
+    .modal-box { background: #fff; border-radius: 10px; padding: 24px; max-width: 520px; width: 90%; box-shadow: 0 8px 30px rgba(0,0,0,0.2); }
+    .modal-box h3 { margin: 0 0 12px; font-size: 16px; }
+    .modal-box p { margin: 6px 0; font-size: 14px; color: #333; }
+    .modal-box code { display: block; background: #f5f5f5; padding: 8px 12px; border-radius: 6px; font-size: 13px; margin: 8px 0; user-select: all; word-break: break-all; }
+    .modal-box .modal-actions { margin-top: 16px; display: flex; gap: 8px; justify-content: flex-end; }
+    .modal-box .modal-actions button { min-width: 80px; }
+    .modal-box .btn-secondary { background: #6c757d; }
+    .modal-box .btn-secondary:hover { background: #5a6268; }
+
+    /* Commit cell formatting */
+    .commit-cell { white-space: nowrap; }
+    .commit-date { font-size: 11px; color: #888; }
+    .commit-date.aging { color: #b8860b; font-weight: bold; }
+    .commit-date.stale { color: #c00; font-weight: bold; }
+    .commit-cell .commit-date { display: block; }
+    .pin-entry { display: flex; align-items: baseline; gap: 4px; margin-bottom: 3px; white-space: nowrap; }
+    .pin-entry:last-child { margin-bottom: 0; }
+    .pin-entry .commit-date { margin-left: 2px; }
+    .source-badge { display: inline-block; font-size: 10px; padding: 1px 5px; border-radius: 3px; color: #fff; text-decoration: none; }
+    .source-badge.manifest { background: #6f42c1; }
+    .source-badge.manifest:hover { background: #5a32a3; }
+    .source-badge.catalog { background: #0d6efd; }
+    .source-badge.catalog:hover { background: #0b5ed7; }
+</style>
+<link rel="stylesheet" href="https://cdn.datatables.net/2.1.8/css/dataTables.dataTables.css" integrity="sha384-eCorNQ6xLKDT9aok8iCYVVP8S813O3kaugZFLBt1YhfR80d1ZgkNcf2ghiTRzRno" crossorigin="anonymous" />
+</head>
+<body>
+<div>
+    <h1>RHOAI Konflux Build Status</h1>
+    <div id="controls">
+        <table>
+            <tr>
+                <td><label for="pat">Personal Access Token</label></td>
+                <td>
+                    <input type="password" id="pat"/>
+                    (<strong>Recommended</strong> &mdash; without a token, GitHub limits you to 60 requests/hour.
+                    Create a fine-grained token for public repos (no additional permissions required)
+                    <a href="https://github.com/settings/personal-access-tokens" target="_blank">here</a>)
+                </td>
+            </tr>
+            <tr>
+                <td><label for="branches">Branches</label></td>
+                <td>
+                    <input type="text" id="branches" placeholder="rhoai-3.4,rhoai-3.4-ea.2" value="main"/>
+                    (Comma separated list e.g. <code>rhoai-3.4,rhoai-3.4-ea.2</code>)
+                </td>
+            </tr>
+            <tr>
+                <td style="vertical-align: top;"><label>Repositories</label></td>
+                <td>
+                    <div id="repo-filter-controls">
+                        <button id="repo-select-all">Select All</button>
+                        <button id="repo-select-none">Select None</button>
+                    </div>
+                    <div id="repo-filter"></div>
+                </td>
+            </tr>
+            <tr>
+                <td></td>
+                <td>
+                    <label><input type="checkbox" id="lookup-history"/> Look up last success commit (slower, more API calls)</label>
+                </td>
+            </tr>
+        </table>
+        <br/>
+        <button id="trigger">Run</button>
+        <button id="rebuild-all">Rebuild All (Needed)</button>
+        <button id="share-btn">Share</button>
+    </div>
+    <div id="progress"></div>
+
+    <table id="build-status-table">
+        <thead>
+        <tr>
+            <th>Branch</th>
+            <th>Repository</th>
+            <th>Run Name</th>
+            <th>Status</th>
+            <th>Started</th>
+            <th>Trigger Retest</th>
+            <th>Run</th>
+            <th>Latest Commit</th>
+            <th>Pinned Commits</th>
+            <th>Last Success Commit</th>
+        </tr>
+        </thead>
+    </table>
+</div>
+
+<div id="toast-container"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js" integrity="sha384-+pxiN6T7yvpryuJmE1gM9PX7yQit15auDb+ZwwvJOd/4be2Cie5/IuVXgQb/S9du" crossorigin="anonymous"></script>
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js" integrity="sha384-1H217gwSVyLSIfaLxHbE7dRb3v4mYCKbpQvzx0cegeju1MVsGrX5xXxAvs/HgeFs" crossorigin="anonymous"></script>
+<script src="https://cdn.datatables.net/2.1.8/js/dataTables.js" integrity="sha384-cDXquhvkdBprgcpTQsrhfhxXRN4wfwmWauQ3wR5ZTyYtGrET2jd68wvJ1LlDqlQG" crossorigin="anonymous"></script>
+
+<script>
+const ORG = 'red-hat-data-services';
+
+const REPOSITORIES = [
+    'argo-workflows',
+    'caikit-nlp',
+    'caikit-tgis-serving',
+    'codeflare-operator',
+    'data-science-pipelines',
+    'data-science-pipelines-operator',
+    'distributed-workloads',
+    'feast',
+    'fms-guardrails-orchestrator',
+    'guardrails-detectors',
+    'ilab-on-ocp',
+    'kserve',
+    'kube-auth-proxy',
+    'kubeflow',
+    'kuberay',
+    'kueue',
+    'llama-stack-k8s-operator',
+    'llm-d-inference-scheduler',
+    'llm-d-kv-cache',
+    'lm-evaluation-harness',
+    'maas-billing',
+    'ml-metadata',
+    'model-metadata-collection',
+    'model-registry',
+    'model-registry-operator',
+    'modelmesh',
+    'modelmesh-runtime-adapter',
+    'modelmesh-serving',
+    'must-gather',
+    'notebooks',
+    'odh-dashboard',
+    'odh-model-controller',
+    'rest-proxy',
+    'rhods-operator',
+    'training-operator',
+    'trustyai-explainability',
+    'trustyai-service-operator',
+    'vllm',
+    'vllm-cpu',
+    'vllm-gaudi',
+    'vllm-orchestrator-gateway',
+    'vllm-rocm',
+];
+
+// Escape HTML to prevent XSS from API data
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.appendChild(document.createTextNode(str));
+    return div.innerHTML;
+}
+
+// Validate that a URL is a safe GitHub URL before rendering as a link
+function safeGitHubUrl(url) {
+    try {
+        const parsed = new URL(url);
+        if (parsed.origin === 'https://github.com') return parsed.href;
+    } catch { /* invalid URL */ }
+    return '';
+}
+
+// Fetch manifests-config.yaml from rhods-operator for a given branch.
+// Returns a Map: repo name (e.g. "kserve") -> Set of pinned commit SHAs.
+// Memoized per branch in manifestCache.
+const manifestCache = new Map();
+
+async function fetchManifestPins(branch) {
+    if (manifestCache.has(branch)) return manifestCache.get(branch);
+
+    const url = `https://raw.githubusercontent.com/${ORG}/rhods-operator/${encodeURIComponent(branch)}/build/manifests-config.yaml`;
+    const promise = (async () => {
+        try {
+            const res = await fetch(url);
+            if (!res.ok) return new Map();
+            const text = await res.text();
+            const doc = jsyaml.load(text);
+            const lines = text.split('\n');
+
+            // Build a line number index: find the line of each "git.commit: <sha>" occurrence
+            const commitLineMap = new Map(); // commit value -> line number (1-based)
+            lines.forEach((line, idx) => {
+                const m = line.match(/^\s*git\.commit:\s*(\S+)/);
+                if (m) {
+                    if (!commitLineMap.has(m[1])) commitLineMap.set(m[1], idx + 1);
+                }
+            });
+
+            // Build map: repo name -> array of { commit, line }
+            const pins = new Map();
+            for (const section of [doc.map, doc.additional_meta]) {
+                if (!section) continue;
+                for (const [, entry] of Object.entries(section)) {
+                    const gitUrl = entry['git.url'] || '';
+                    const commit = String(entry['git.commit'] || '');
+                    if (!gitUrl || !commit) continue;
+                    const match = gitUrl.match(/github\.com\/[^/]+\/([^/]+?)(?:\.git)?$/);
+                    if (!match) continue;
+                    const repoName = match[1];
+                    if (!pins.has(repoName)) pins.set(repoName, []);
+                    const existing = pins.get(repoName);
+                    // Deduplicate by commit SHA
+                    if (!existing.some(e => e.commit === commit)) {
+                        existing.push({ commit, line: commitLineMap.get(commit) || null, source: 'manifest' });
+                    }
+                }
+            }
+            return pins;
+        } catch {
+            return new Map();
+        }
+    })();
+
+    manifestCache.set(branch, promise);
+    return promise;
+}
+
+// Fetch pinned commits from RHOAI-Build-Config catalog_build_args.map
+// Format: KEY_GIT_COMMIT=<sha> / KEY_GIT_URL=https://github.com/org/repo pairs
+const catalogCache = new Map();
+
+async function fetchCatalogPins(branch) {
+    if (catalogCache.has(branch)) return catalogCache.get(branch);
+
+    const url = `https://raw.githubusercontent.com/${ORG}/RHOAI-Build-Config/${encodeURIComponent(branch)}/catalog/catalog_build_args.map`;
+    const promise = (async () => {
+        try {
+            const res = await fetch(url);
+            if (!res.ok) return new Map();
+            const text = await res.text();
+            const lines = text.split('\n');
+
+            // Parse KEY=VALUE pairs, group by prefix (everything before _GIT_COMMIT/_GIT_URL)
+            const entries = new Map(); // prefix -> { commit, url, line }
+            lines.forEach((line, idx) => {
+                const commitMatch = line.match(/^(\w+)_GIT_COMMIT=([a-f0-9]+)$/);
+                if (commitMatch) {
+                    const prefix = commitMatch[1];
+                    if (!entries.has(prefix)) entries.set(prefix, {});
+                    entries.get(prefix).commit = commitMatch[2];
+                    entries.get(prefix).line = idx + 1;
+                }
+                const urlMatch = line.match(/^(\w+)_GIT_URL=(.+)$/);
+                if (urlMatch) {
+                    const prefix = urlMatch[1];
+                    if (!entries.has(prefix)) entries.set(prefix, {});
+                    entries.get(prefix).url = urlMatch[2].trim();
+                }
+            });
+
+            // Build map: repo name -> array of { commit, line, source: 'catalog' }
+            const pins = new Map();
+            for (const [, entry] of entries) {
+                if (!entry.commit || !entry.url) continue;
+                const match = entry.url.match(/github\.com\/[^/]+\/([^/]+?)(?:\.git)?$/);
+                if (!match) continue;
+                const repoName = match[1];
+                if (!pins.has(repoName)) pins.set(repoName, []);
+                const existing = pins.get(repoName);
+                if (!existing.some(e => e.commit === entry.commit)) {
+                    existing.push({ commit: entry.commit, line: entry.line, source: 'catalog' });
+                }
+            }
+            return pins;
+        } catch {
+            return new Map();
+        }
+    })();
+
+    catalogCache.set(branch, promise);
+    return promise;
+}
+
+// Toast notification: type = 'success' | 'error' | 'info' | 'warn'
+function showToast(message, type = 'info', duration = 10000) {
+    const container = document.getElementById('toast-container');
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    toast.textContent = message;
+    toast.style.animationDuration = '0.5s';
+    toast.style.animationDelay = `0s, ${duration / 1000}s`;
+    container.appendChild(toast);
+    setTimeout(() => toast.remove(), duration + 300);
+}
+
+// Modal dialog: returns a Promise<boolean> for confirm, or void for info
+function showModal({ title, bodyHtml, confirmText = 'OK', cancelText = null }) {
+    return new Promise(resolve => {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        const box = document.createElement('div');
+        box.className = 'modal-box';
+
+        let html = `<h3>${escapeHtml(title)}</h3>${bodyHtml}`;
+        html += '<div class="modal-actions">';
+        if (cancelText) {
+            html += `<button class="btn-secondary" data-action="cancel">${escapeHtml(cancelText)}</button>`;
+        }
+        html += `<button data-action="confirm">${escapeHtml(confirmText)}</button>`;
+        html += '</div>';
+        box.innerHTML = html;
+
+        box.addEventListener('click', e => {
+            const btn = e.target.closest('[data-action]');
+            if (!btn) return;
+            const action = btn.dataset.action;
+            if (action === 'confirm') { overlay.remove(); resolve(true); }
+            else if (action === 'cancel') { overlay.remove(); resolve(false); }
+            else if (action === 'copy') {
+                const text = btn.dataset.copyText || '';
+                navigator.clipboard.writeText(text).then(
+                    () => { btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = 'Copy'; }, 1500); },
+                    () => showToast('Could not copy. Select the text manually.', 'warn')
+                );
+            }
+        });
+        overlay.addEventListener('click', e => {
+            if (e.target === overlay) { overlay.remove(); resolve(false); }
+        });
+
+        overlay.appendChild(box);
+        document.body.appendChild(overlay);
+    });
+}
+
+// Memoization cache for API calls (cleared on each Run click)
+const apiCache = new Map();
+
+// Look up a commit date from cache (history list or individual commit)
+// Returns { text, isOld } where isOld means older than 7 days
+function findCommitDateFromCache(repo, branch, sha) {
+    if (!sha || !/^[a-f0-9]{7,40}$/.test(sha)) return null;
+    let dateStr = null;
+    // Check history list cache
+    const histKey = `https://api.github.com/repos/${ORG}/${repo}/commits?sha=${encodeURIComponent(branch)}&per_page=50`;
+    const commits = apiCache.get(histKey);
+    if (commits && Array.isArray(commits)) {
+        const match = commits.find(c => c.sha === sha);
+        dateStr = match?.commit?.committer?.date || match?.commit?.author?.date || null;
+    }
+    // Check individual commit cache
+    if (!dateStr) {
+        const commitKey = `https://api.github.com/repos/${ORG}/${repo}/commits/${sha}`;
+        const commitData = apiCache.get(commitKey);
+        dateStr = commitData?.commit?.committer?.date || commitData?.commit?.author?.date || null;
+    }
+    if (!dateStr) return null;
+    const date = new Date(dateStr);
+    const ageDays = (Date.now() - date.getTime()) / (24 * 60 * 60 * 1000);
+    const ageClass = ageDays > 21 ? 'stale' : ageDays > 7 ? 'aging' : '';
+    return { text: date.toLocaleString(), ageClass };
+}
+
+// Build a tooltip string with commit message, author, and relative time
+function buildCommitTooltip(repo, branch, sha) {
+    if (!sha || !/^[a-f0-9]{7,40}$/.test(sha)) return '';
+    let commitObj = null;
+    const histKey = `https://api.github.com/repos/${ORG}/${repo}/commits?sha=${encodeURIComponent(branch)}&per_page=50`;
+    const commits = apiCache.get(histKey);
+    if (commits && Array.isArray(commits)) {
+        commitObj = commits.find(c => c.sha === sha);
+    }
+    if (!commitObj) {
+        commitObj = apiCache.get(`https://api.github.com/repos/${ORG}/${repo}/commits/${sha}`);
+    }
+    if (!commitObj?.commit) return '';
+    const parts = [];
+    const msg = commitObj.commit.message;
+    if (msg) parts.push(msg.split('\n')[0]);
+    const author = commitObj.commit.author?.name || commitObj.commit.committer?.name;
+    if (author) parts.push('by ' + author);
+    const dateStr = commitObj.commit.committer?.date || commitObj.commit.author?.date;
+    if (dateStr) parts.push(timeAgo(new Date(dateStr)));
+    return parts.join('\n');
+}
+
+function timeAgo(date) {
+    const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+    if (seconds < 60) return 'just now';
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return minutes + 'm ago';
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return hours + 'h ago';
+    const days = Math.floor(hours / 24);
+    if (days < 30) return days + 'd ago';
+    const months = Math.floor(days / 30);
+    return months + 'mo ago';
+}
+
+function renderDateSpan(dateInfo) {
+    if (!dateInfo) return '';
+    const cls = 'commit-date' + (dateInfo.ageClass ? ' ' + dateInfo.ageClass : '');
+    return `<span class="${cls}">${escapeHtml(dateInfo.text)}</span>`;
+}
+
+// Find last successful commit for a specific check run name (cache must be pre-warmed)
+function findLastSuccessFromCache(repo, branch, runName) {
+    const histKey = `https://api.github.com/repos/${ORG}/${repo}/commits?sha=${encodeURIComponent(branch)}&per_page=50`;
+    const commits = apiCache.get(histKey);
+    if (!commits || !Array.isArray(commits)) return '';
+
+    // Skip first commit (HEAD, already known failed)
+    for (let i = 1; i < commits.length; i++) {
+        const sha = commits[i].sha;
+        const checkKey = `https://api.github.com/repos/${ORG}/${repo}/commits/${sha}/check-runs?per_page=100`;
+        const data = apiCache.get(checkKey);
+        if (!data || !data.check_runs) continue;
+        const match = data.check_runs.find(r => r.name === runName);
+        if (match) {
+            const conclusion = (match.conclusion || '').toLowerCase();
+            if (conclusion === 'success' || conclusion === 'succeeded') {
+                return sha;
+            }
+        }
+    }
+    return '';
+}
+
+// Batch-fetch URLs in parallel with rate limit awareness
+async function batchFetch(urls, headers, batchSize, delay, progressCb, rateLimitCb) {
+    for (let i = 0; i < urls.length; i += batchSize) {
+        const batch = urls.slice(i, i + batchSize);
+        const results = await Promise.allSettled(batch.map(async url => {
+            if (apiCache.has(url)) return;
+            const res = await fetch(url, { headers });
+            if (res.status === 403 || res.status === 429) {
+                rateLimitCb(res);
+                apiCache.set(url, null);
+                return;
+            }
+            if (!res.ok) { apiCache.set(url, null); return; }
+            apiCache.set(url, await res.json());
+        }));
+        if (progressCb) progressCb(Math.min(i + batchSize, urls.length), urls.length);
+        if (i + batchSize < urls.length) {
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+}
+
+const PREF_KEY_REPOS = 'rhoai-dashboard-repos';
+const PREF_KEY_BRANCHES = 'rhoai-dashboard-branches';
+const PREF_KEY_HISTORY = 'rhoai-dashboard-history';
+const PREF_KEY_TOKEN = 'rhoai-dashboard-token';
+
+// Restore token from localStorage
+(function() {
+    const saved = localStorage.getItem(PREF_KEY_TOKEN);
+    if (saved) document.getElementById('pat').value = saved;
+})();
+document.getElementById('pat').addEventListener('input', function() {
+    const val = this.value.trim();
+    if (val) {
+        localStorage.setItem(PREF_KEY_TOKEN, val);
+    } else {
+        localStorage.removeItem(PREF_KEY_TOKEN);
+    }
+});
+
+// Restore history lookup checkbox preference
+(function() {
+    const saved = localStorage.getItem(PREF_KEY_HISTORY);
+    if (saved === 'true') document.getElementById('lookup-history').checked = true;
+})();
+document.getElementById('lookup-history').addEventListener('change', function() {
+    localStorage.setItem(PREF_KEY_HISTORY, this.checked);
+});
+
+// Build repository checkboxes (URL param ?repos= overrides localStorage)
+(function buildRepoFilter() {
+    const container = document.getElementById('repo-filter');
+    const urlParams = new URLSearchParams(window.location.search);
+    const reposParam = urlParams.get('repos');
+    const selected = reposParam
+        ? reposParam.split(',').map(r => r.trim()).filter(Boolean)
+        : loadRepoPref();
+    REPOSITORIES.forEach(repo => {
+        const label = document.createElement('label');
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.value = repo;
+        cb.checked = selected ? selected.includes(repo) : false;
+        cb.addEventListener('change', saveRepoPref);
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(' ' + repo));
+        container.appendChild(label);
+    });
+    // If URL param was used, save it as the new preference
+    if (reposParam) saveRepoPref();
+})();
+
+function loadRepoPref() {
+    try {
+        const v = localStorage.getItem(PREF_KEY_REPOS);
+        if (v) return JSON.parse(v);
+    } catch { /* ignore */ }
+    return null;
+}
+
+function saveRepoPref() {
+    const selected = getSelectedRepos();
+    localStorage.setItem(PREF_KEY_REPOS, JSON.stringify(selected));
+}
+
+function getSelectedRepos() {
+    return Array.from(document.querySelectorAll('#repo-filter input:checked')).map(cb => cb.value);
+}
+
+document.getElementById('repo-select-all').addEventListener('click', function() {
+    document.querySelectorAll('#repo-filter input').forEach(cb => { cb.checked = true; });
+    saveRepoPref();
+});
+document.getElementById('repo-select-none').addEventListener('click', function() {
+    document.querySelectorAll('#repo-filter input').forEach(cb => { cb.checked = false; });
+    saveRepoPref();
+});
+
+document.getElementById('trigger').addEventListener('click', loadBuildData);
+document.getElementById('rebuild-all').addEventListener('click', rebuildAll);
+document.getElementById('share-btn').addEventListener('click', function() {
+    const branches = document.getElementById('branches').value.trim();
+    const repos = getSelectedRepos();
+    // Preserve non-dashboard query params (e.g. GoLand's _ijt token)
+    const params = new URLSearchParams(window.location.search);
+    params.delete('branches');
+    params.delete('repos');
+    if (branches) params.set('branches', branches);
+    if (repos.length > 0 && repos.length < REPOSITORIES.length) params.set('repos', repos.join(','));
+    const url = window.location.origin + window.location.pathname
+        + (params.toString() ? '?' + params.toString() : '');
+    navigator.clipboard.writeText(url).then(() => {
+        showToast('Link copied to clipboard!', 'success');
+    }).catch(() => {
+        showToast(url, 'info', 10000);
+    });
+});
+
+// Event delegation for retest buttons (replaces inline onClick + eval)
+document.getElementById('build-status-table').addEventListener('click', function(e) {
+    const btn = e.target.closest('button[data-retest]');
+    if (!btn) return;
+    retriggerTest(
+        btn.dataset.org,
+        btn.dataset.repo,
+        btn.dataset.branch,
+        btn.dataset.commit,
+        btn.dataset.testname,
+        false
+    );
+});
+
+// Load preferences on page load, auto-run if URL params are present
+(function() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const branchParam = urlParams.get('branches');
+    if (branchParam) {
+        document.getElementById('branches').value = branchParam;
+    } else {
+        const savedBranches = localStorage.getItem(PREF_KEY_BRANCHES);
+        if (savedBranches) document.getElementById('branches').value = savedBranches;
+    }
+
+    // Auto-trigger if URL has query params
+    if (branchParam || urlParams.get('repos')) {
+        setTimeout(loadBuildData, 0);
+    }
+})();
+
+async function loadBuildData() {
+    const branchInput = document.getElementById('branches').value.trim();
+    if (!branchInput) { showToast('Please specify at least one branch.', 'warn'); return; }
+
+    apiCache.clear();
+
+    const branches = branchInput.split(',').map(b => b.trim()).filter(Boolean);
+    localStorage.setItem(PREF_KEY_BRANCHES, branchInput);
+
+    const selectedRepos = getSelectedRepos();
+    if (selectedRepos.length === 0) { showToast('Please select at least one repository.', 'warn'); return; }
+
+    const headers = {};
+    const token = document.getElementById('pat').value.trim();
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const progress = document.getElementById('progress');
+    const total = selectedRepos.length * branches.length;
+    let completed = 0;
+    progress.textContent = `Fetching data: 0 / ${total}...`;
+
+    const results = [];
+
+    // Process in batches to avoid rate limits
+    const tasks = selectedRepos.flatMap(repo =>
+        branches.map(branch => ({ repo, branch }))
+    );
+
+    let rateLimited = false;
+    const batchSize = token ? 10 : 5;
+    for (let i = 0; i < tasks.length; i += batchSize) {
+        if (rateLimited) break;
+        const batch = tasks.slice(i, i + batchSize);
+        const batchResults = await Promise.allSettled(
+            batch.map(async ({ repo, branch }) => {
+                try {
+                    const res = await fetch(
+                        `https://api.github.com/repos/${ORG}/${repo}/commits/${branch}/check-runs?per_page=100&_=${Date.now()}`,
+                        { headers }
+                    );
+                    if (res.status === 403 || res.status === 429) {
+                        const resetHeader = res.headers.get('x-ratelimit-reset');
+                        const resetTime = resetHeader ? new Date(resetHeader * 1000).toLocaleTimeString() : 'unknown';
+                        progress.textContent = `Rate limited by GitHub API. Resets at ${resetTime}. Please add a Personal Access Token and retry.`;
+                        rateLimited = true;
+                        return null;
+                    }
+                    if (!res.ok) return null;
+                    const json = await res.json();
+                    const latestCommit = json.check_runs?.[0]?.head_sha || '';
+                    return { branch, org: ORG, repo, runs: json, latestCommit };
+                } catch {
+                    return null;
+                } finally {
+                    completed++;
+                    if (!rateLimited) progress.textContent = `Fetching data: ${completed} / ${total}...`;
+                }
+            })
+        );
+        batchResults.forEach(r => { if (r.status === 'fulfilled' && r.value) results.push(r.value); });
+        // Delay between batches to ease rate pressure
+        if (i + batchSize < tasks.length && !rateLimited) {
+            await new Promise(resolve => setTimeout(resolve, token ? 100 : 1500));
+        }
+    }
+
+    if (rateLimited && results.length === 0) return;
+
+    progress.textContent = 'Processing results...';
+
+    // Phase 1: Build initial table data from HEAD check runs
+    const prelimData = results.flatMap(item => {
+        const allKonflux = (item.runs.check_runs || [])
+            .filter(run => run.name.includes('Konflux') || run.name.includes('konflux'));
+
+        // Deduplicate: when both "Konflux Production Internal" and "Red Hat Konflux"
+        // runs exist for the same component (suffix after "/"), prefer Production.
+        // Fall back to "Red Hat Konflux" only when no Production run exists for that component.
+        const productionRuns = allKonflux.filter(r => r.name.toLowerCase().includes('production'));
+        const productionSuffixes = new Set(productionRuns.map(r => {
+            const sep = r.name.indexOf('/');
+            return sep >= 0 ? r.name.slice(sep + 1).trim().toLowerCase() : r.name.toLowerCase();
+        }));
+
+        const dedupedRuns = allKonflux.filter(run => {
+            const isProduction = run.name.toLowerCase().includes('production');
+            if (isProduction) return true;
+            // Keep non-Production run only if no Production run exists for the same component
+            const sep = run.name.indexOf('/');
+            const suffix = sep >= 0 ? run.name.slice(sep + 1).trim().toLowerCase() : run.name.toLowerCase();
+            return !productionSuffixes.has(suffix);
+        });
+
+        return dedupedRuns
+            .map(run => {
+                const separator = run.name.indexOf('/');
+                const testName = separator >= 0 ? run.name.slice(separator + 1).trim() : run.name;
+                const conclusion = (run.conclusion || '').toLowerCase();
+                const runSucceeded = conclusion === 'success' || conclusion === 'succeeded';
+
+                return {
+                    branch: item.branch,
+                    repo: item.repo,
+                    name: run.name,
+                    status: run.output?.title || run.conclusion || run.status,
+                    started: run.started_at ? new Date(run.started_at).toLocaleString() : '',
+                    org: item.org,
+                    commitSha: run.head_sha,
+                    testName,
+                    runUrl: run.html_url,
+                    latest: item.latestCommit,
+                    success: runSucceeded ? (run.head_sha || '') : '',
+                    rebuildNeeded: !runSucceeded,
+                    runSucceeded,
+                };
+            });
+    });
+
+    // Fetch commit history for all repo/branches (needed for commit dates + optional last-success lookup)
+    const allUniqueBranches = [...new Set(prelimData.map(r => `${r.repo}||${r.branch}`))];
+    if (allUniqueBranches.length > 0 && !rateLimited) {
+        const allHistoryUrls = allUniqueBranches.map(key => {
+            const [repo, branch] = key.split('||');
+            return `https://api.github.com/repos/${ORG}/${repo}/commits?sha=${encodeURIComponent(branch)}&per_page=50`;
+        });
+        progress.textContent = `Fetching commit history for ${allUniqueBranches.length} repo/branch(es)...`;
+        await batchFetch(allHistoryUrls, headers, token ? 10 : 5, token ? 100 : 1500,
+            (done, total) => { if (!rateLimited) progress.textContent = `Fetching commit history: ${done} / ${total}...`; },
+            () => { rateLimited = true; }
+        );
+    }
+
+    // Phase 2: For failed runs, look up last success in commit history (up to 50 commits back)
+    const lookupHistory = document.getElementById('lookup-history').checked;
+    const failedRuns = prelimData.filter(r => !r.runSucceeded);
+    if (lookupHistory && failedRuns.length > 0 && !rateLimited) {
+
+        // Step 2b: Fetch check-runs in waves of 5 commits per repo/branch, stop early on success
+        if (!rateLimited) {
+            // Group failed runs by repo/branch
+            const failedByBranch = new Map();
+            for (const item of failedRuns) {
+                const key = `${item.repo}||${item.branch}`;
+                if (!failedByBranch.has(key)) failedByBranch.set(key, []);
+                failedByBranch.get(key).push(item);
+            }
+
+            // Build commit lists per repo/branch (skip HEAD at index 0)
+            const commitLists = new Map();
+            const uniqueFailedBranches = [...new Set(failedRuns.map(r => `${r.repo}||${r.branch}`))];
+            for (const key of uniqueFailedBranches) {
+                const [repo, branch] = key.split('||');
+                const histUrl = `https://api.github.com/repos/${ORG}/${repo}/commits?sha=${encodeURIComponent(branch)}&per_page=50`;
+                const commits = apiCache.get(histUrl);
+                if (!commits || !Array.isArray(commits)) continue;
+                commitLists.set(key, commits.slice(1).map(c => c.sha));
+            }
+
+            const WAVE_SIZE = 5;
+            const maxWaves = Math.ceil(49 / WAVE_SIZE);
+            let totalFetched = 0;
+
+            for (let wave = 0; wave < maxWaves && !rateLimited; wave++) {
+                // Collect URLs for this wave — only for repo/branches that still have unresolved runs
+                const waveUrls = [];
+                for (const [key, commits] of commitLists) {
+                    const pending = failedByBranch.get(key)?.filter(r => !r.success);
+                    if (!pending || pending.length === 0) continue;
+                    const start = wave * WAVE_SIZE;
+                    const end = Math.min(start + WAVE_SIZE, commits.length);
+                    const [repo] = key.split('||');
+                    for (let i = start; i < end; i++) {
+                        waveUrls.push(`https://api.github.com/repos/${ORG}/${repo}/commits/${commits[i]}/check-runs?per_page=100`);
+                    }
+                }
+
+                if (waveUrls.length === 0) break;
+
+                totalFetched += waveUrls.length;
+                progress.textContent = `Fetching historical check runs (wave ${wave + 1}, ${totalFetched} commits)...`;
+                await batchFetch(waveUrls, headers, token ? 15 : 5, token ? 100 : 1500,
+                    null,
+                    () => { rateLimited = true; }
+                );
+
+                // Check for successes after each wave
+                for (const [key, items] of failedByBranch) {
+                    for (const item of items) {
+                        if (item.success) continue;
+                        const lastSuccess = findLastSuccessFromCache(item.repo, item.branch, item.name);
+                        if (lastSuccess) item.success = lastSuccess;
+                    }
+                }
+
+                // Stop if all runs resolved
+                const remaining = failedRuns.filter(r => !r.success).length;
+                if (remaining === 0) break;
+            }
+        }
+    }
+
+    // Phase 3: Fetch pinned commits from rhods-operator manifests and RHOAI-Build-Config catalog
+    progress.textContent = 'Fetching pinned commit references...';
+    manifestCache.clear();
+    catalogCache.clear();
+    const uniqueBranchNames = [...new Set(prelimData.map(r => r.branch))];
+    const manifestMaps = new Map(); // branch -> Map<repo, Array<{commit, line, source}>>
+    const catalogMaps = new Map();
+    await Promise.allSettled(uniqueBranchNames.flatMap(branch => [
+        fetchManifestPins(branch).then(pins => manifestMaps.set(branch, pins)),
+        fetchCatalogPins(branch).then(pins => catalogMaps.set(branch, pins)),
+    ]));
+
+    // Attach pinned commits to each row (merge both sources, group by commit SHA)
+    for (const item of prelimData) {
+        const byCommit = new Map(); // commit SHA -> { commit, sources: [{ source, line }] }
+        for (const [, maps] of [['manifest', manifestMaps], ['catalog', catalogMaps]]) {
+            const pins = maps.get(item.branch);
+            if (pins && pins.has(item.repo)) {
+                for (const p of pins.get(item.repo)) {
+                    if (!byCommit.has(p.commit)) {
+                        byCommit.set(p.commit, { commit: p.commit, sources: [] });
+                    }
+                    byCommit.get(p.commit).sources.push({ source: p.source, line: p.line });
+                }
+            }
+        }
+        item.pinnedCommits = [...byCommit.values()];
+    }
+
+    // Fetch commit dates for pinned SHAs not already in cache
+    if (!rateLimited) {
+        const missingCommitUrls = [];
+        for (const item of prelimData) {
+            for (const p of item.pinnedCommits) {
+                if (!/^[a-f0-9]{7,40}$/.test(p.commit)) continue;
+                if (findCommitDateFromCache(item.repo, item.branch, p.commit)) continue;
+                const url = `https://api.github.com/repos/${ORG}/${item.repo}/commits/${p.commit}`;
+                if (!apiCache.has(url) && !missingCommitUrls.includes(url)) {
+                    missingCommitUrls.push(url);
+                }
+            }
+        }
+        if (missingCommitUrls.length > 0) {
+            progress.textContent = `Fetching dates for ${missingCommitUrls.length} pinned commit(s)...`;
+            await batchFetch(missingCommitUrls, headers, token ? 10 : 5, token ? 100 : 1500,
+                (done, total) => { if (!rateLimited) progress.textContent = `Fetching pinned commit dates: ${done} / ${total}...`; },
+                () => { rateLimited = true; }
+            );
+        }
+    }
+
+    progress.textContent = '';
+
+    const tableData = prelimData;
+
+    if (tableData.length === 0) {
+        showToast('No Konflux check runs found. Verify the branches exist and the repos have Konflux checks.', 'warn', 6000);
+        return;
+    }
+
+    new DataTable('#build-status-table', {
+        destroy: true,
+        paging: false,
+        order: [[1, 'asc'], [0, 'asc'], [2, 'asc']],
+        data: tableData.map(item => {
+            const safeUrl = safeGitHubUrl(item.runUrl);
+            // Build URLs with encodeURIComponent for path safety, escapeHtml for HTML attribute safety
+            const repoBase = `https://github.com/${encodeURIComponent(item.org)}/${encodeURIComponent(item.repo)}`;
+            const branchHref = escapeHtml(`${repoBase}/tree/${encodeURIComponent(item.branch)}`);
+            const branchLink = `<a href="${branchHref}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.branch)}</a>`;
+            const latestDate = findCommitDateFromCache(item.repo, item.branch, item.latest);
+            const latestMsg = escapeHtml(buildCommitTooltip(item.repo, item.branch, item.latest));
+            const latestLink = item.latest
+                ? `<div class="commit-cell"><a href="${escapeHtml(`${repoBase}/commit/${encodeURIComponent(item.latest)}`)}" target="_blank" rel="noopener noreferrer" title="${latestMsg}">${escapeHtml(item.latest.slice(0, 7))}</a>`
+                    + renderDateSpan(latestDate) + '</div>'
+                : '';
+            const successDate = findCommitDateFromCache(item.repo, item.branch, item.success);
+            const successMsg = escapeHtml(buildCommitTooltip(item.repo, item.branch, item.success));
+            const successLink = item.success
+                ? `<div class="commit-cell"><a href="${escapeHtml(`${repoBase}/commit/${encodeURIComponent(item.success)}`)}" target="_blank" rel="noopener noreferrer" title="${successMsg}">${escapeHtml(item.success.slice(0, 7))}</a>`
+                    + renderDateSpan(successDate) + '</div>'
+                : '';
+            // Pinned commits: flag mismatch on raw data, link to source file
+            const pinMismatch = item.pinnedCommits.length > 0 && item.latest
+                && !item.pinnedCommits.some(p => p.commit === item.latest);
+            const manifestFileBase = `https://github.com/${ORG}/rhods-operator/blob/${encodeURIComponent(item.branch)}/build/manifests-config.yaml`;
+            const catalogFileBase = `https://github.com/${ORG}/RHOAI-Build-Config/blob/${encodeURIComponent(item.branch)}/catalog/catalog_build_args.map`;
+            const pinnedHtml = item.pinnedCommits.length > 0
+                ? item.pinnedCommits.map(p => {
+                    const isSha = /^[a-f0-9]{7,40}$/.test(p.commit);
+                    const pinMsg = isSha ? escapeHtml(buildCommitTooltip(item.repo, item.branch, p.commit)) : '';
+                    const commitDisplay = isSha
+                        ? `<a href="${escapeHtml(`${repoBase}/commit/${encodeURIComponent(p.commit)}`)}" target="_blank" rel="noopener noreferrer" title="${pinMsg}">${escapeHtml(p.commit.slice(0, 7))}</a>`
+                        : `<span style="color:#c00;font-style:italic" title="Not a commit SHA">${escapeHtml(p.commit)}</span>`;
+                    const pinDate = isSha ? findCommitDateFromCache(item.repo, item.branch, p.commit) : null;
+                    const badges = p.sources.map(s => {
+                        const fileBase = s.source === 'catalog' ? catalogFileBase : manifestFileBase;
+                        const lineAnchor = s.line ? `#L${s.line}` : '';
+                        const lineHref = escapeHtml(`${fileBase}${lineAnchor}`);
+                        return `<a href="${lineHref}" target="_blank" rel="noopener noreferrer" class="source-badge ${s.source}">${s.source}</a>`;
+                    }).join(' ');
+                    return `<div class="pin-entry">`
+                        + commitDisplay + ' '
+                        + badges
+                        + (pinDate ? ' ' + renderDateSpan(pinDate) : '')
+                        + `</div>`;
+                }).join('')
+                : '';
+
+            return [
+                branchLink,
+                escapeHtml(item.repo),
+                escapeHtml(item.name),
+                escapeHtml(item.status || ''),
+                escapeHtml(item.started),
+                `<button data-retest data-org="${escapeHtml(item.org)}" data-repo="${escapeHtml(item.repo)}" data-branch="${escapeHtml(item.branch)}" data-commit="${escapeHtml(item.commitSha)}" data-testname="${escapeHtml(item.testName)}">retest</button>`,
+                safeUrl ? `<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer">link</a>` : '',
+                latestLink,
+                pinnedHtml,
+                successLink,
+                item.rebuildNeeded ? '1' : '',
+                pinMismatch ? '1' : '',
+            ];
+        }),
+        createdRow: function(row, data) {
+            const status = (data[3] || '').toLowerCase();
+            if (status.includes('success') || status.includes('succeed')) $(row).addClass('success-row');
+            else if (status.includes('fail')) $(row).addClass('failure-row');
+
+            if (data[10]) $(row).removeClass('success-row failure-row').addClass('rebuild-needed');
+
+            // Highlight pinned commit cell if it doesn't match latest
+            if (data[11]) $(row.cells[8]).addClass('pin-mismatch');
+        },
+        columns: [
+            { title: 'Branch' },
+            { title: 'Repository' },
+            { title: 'Run Name' },
+            { title: 'Status' },
+            { title: 'Started' },
+            { title: 'Trigger Retest' },
+            { title: 'Run' },
+            { title: 'Latest Commit' },
+            { title: 'Pinned Commits' },
+            { title: 'Last Success Commit' },
+            { title: '_rebuildNeeded', visible: false },
+            { title: '_pinMismatch', visible: false },
+        ],
+    });
+}
+
+async function retriggerTest(org, repo, branch, commitSha, testName, silent) {
+    const token = document.getElementById('pat').value.trim();
+    if (!token) { if (!silent) showToast('Token required to trigger retest.', 'warn'); return; }
+
+    // Validate inputs are safe alphanumeric/dash/dot values (no injection)
+    const safePattern = /^[a-zA-Z0-9._-]+$/;
+    if (![org, repo, branch, commitSha, testName].every(v => safePattern.test(v))) {
+        if (!silent) showToast('Invalid parameters detected.', 'error');
+        return;
+    }
+
+    const url = `https://api.github.com/repos/${org}/${repo}/commits/${commitSha}/comments`;
+    const comment = `/retest ${testName} branch:${branch}`;
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ body: comment }),
+    });
+
+    if (silent) return;
+    if (response.ok) {
+        showToast('Run retriggered!', 'success');
+    } else {
+        const status = response.status;
+        const commitUrl = `https://github.com/${org}/${repo}/commit/${commitSha}`;
+        const permHint = (status === 403 || status === 404)
+            ? '<p>Your token may not have write access to this repository.</p>' : '';
+        showModal({
+            title: `Retest failed (HTTP ${status})`,
+            bodyHtml: `${permHint}
+                <p>You can manually post this comment on the commit:</p>
+                <code>${escapeHtml(comment)}</code>
+                <p><button data-action="copy" data-copy-text="${escapeHtml(comment)}">Copy</button></p>
+                <p>Commit: <a href="${escapeHtml(commitUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(commitUrl)}</a></p>`,
+            confirmText: 'Close',
+        });
+    }
+}
+
+async function rebuildAll() {
+    const rows = document.querySelectorAll('#build-status-table tr.rebuild-needed');
+    if (rows.length === 0) { showToast('All builds are up-to-date!', 'success'); return; }
+
+    const confirmed = await showModal({
+        title: 'Rebuild All',
+        bodyHtml: `<p>Trigger rebuild for <strong>${rows.length}</strong> flagged run(s)?</p>`,
+        confirmText: 'Rebuild',
+        cancelText: 'Cancel',
+    });
+    if (!confirmed) return;
+
+    rows.forEach(row => {
+        const btn = row.querySelector('button[data-retest]');
+        if (btn) {
+            retriggerTest(
+                btn.dataset.org,
+                btn.dataset.repo,
+                btn.dataset.branch,
+                btn.dataset.commit,
+                btn.dataset.testname,
+                true
+            );
+        }
+    });
+
+    showToast(`${rows.length} rebuild(s) triggered!`, 'success');
+}
+</script>
+</body>
+</html>
