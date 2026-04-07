@@ -62,8 +62,6 @@
     .source-badge { display: inline-block; font-size: 10px; padding: 1px 5px; border-radius: 3px; color: #fff; text-decoration: none; }
     .source-badge.manifest { background: #6f42c1; }
     .source-badge.manifest:hover { background: #5a32a3; }
-    .source-badge.catalog { background: #0d6efd; }
-    .source-badge.catalog:hover { background: #0b5ed7; }
 </style>
 <link rel="stylesheet" href="https://cdn.datatables.net/2.1.8/css/dataTables.dataTables.css" integrity="sha384-eCorNQ6xLKDT9aok8iCYVVP8S813O3kaugZFLBt1YhfR80d1ZgkNcf2ghiTRzRno" crossorigin="anonymous" />
 </head>
@@ -252,62 +250,6 @@ async function fetchManifestPins(branch) {
     })();
 
     manifestCache.set(branch, promise);
-    return promise;
-}
-
-// Fetch pinned commits from RHOAI-Build-Config catalog_build_args.map
-// Format: KEY_GIT_COMMIT=<sha> / KEY_GIT_URL=https://github.com/org/repo pairs
-const catalogCache = new Map();
-
-async function fetchCatalogPins(branch) {
-    if (catalogCache.has(branch)) return catalogCache.get(branch);
-
-    const url = `https://raw.githubusercontent.com/${ORG}/RHOAI-Build-Config/${encodeURIComponent(branch)}/catalog/catalog_build_args.map`;
-    const promise = (async () => {
-        try {
-            const res = await fetch(url);
-            if (!res.ok) return new Map();
-            const text = await res.text();
-            const lines = text.split('\n');
-
-            // Parse KEY=VALUE pairs, group by prefix (everything before _GIT_COMMIT/_GIT_URL)
-            const entries = new Map(); // prefix -> { commit, url, line }
-            lines.forEach((line, idx) => {
-                const commitMatch = line.match(/^(\w+)_GIT_COMMIT=([a-f0-9]+)$/);
-                if (commitMatch) {
-                    const prefix = commitMatch[1];
-                    if (!entries.has(prefix)) entries.set(prefix, {});
-                    entries.get(prefix).commit = commitMatch[2];
-                    entries.get(prefix).line = idx + 1;
-                }
-                const urlMatch = line.match(/^(\w+)_GIT_URL=(.+)$/);
-                if (urlMatch) {
-                    const prefix = urlMatch[1];
-                    if (!entries.has(prefix)) entries.set(prefix, {});
-                    entries.get(prefix).url = urlMatch[2].trim();
-                }
-            });
-
-            // Build map: repo name -> array of { commit, line, source: 'catalog' }
-            const pins = new Map();
-            for (const [, entry] of entries) {
-                if (!entry.commit || !entry.url) continue;
-                const match = entry.url.match(/github\.com\/[^/]+\/([^/]+?)(?:\.git)?$/);
-                if (!match) continue;
-                const repoName = match[1];
-                if (!pins.has(repoName)) pins.set(repoName, []);
-                const existing = pins.get(repoName);
-                if (!existing.some(e => e.commit === entry.commit)) {
-                    existing.push({ commit: entry.commit, line: entry.line, source: 'catalog' });
-                }
-            }
-            return pins;
-        } catch {
-            return new Map();
-        }
-    })();
-
-    catalogCache.set(branch, promise);
     return promise;
 }
 
@@ -724,8 +666,12 @@ async function loadBuildData() {
             });
     });
 
-    // Fetch commit history for all repo/branches (needed for commit dates + optional last-success lookup)
-    const allUniqueBranches = [...new Set(prelimData.map(r => `${r.repo}||${r.branch}`))];
+    // Identify repo/branches with no Konflux runs on HEAD (may have runs on older commits)
+    const reposWithRuns = new Set(prelimData.map(r => `${r.repo}||${r.branch}`));
+    const reposWithoutRuns = tasks.filter(t => !reposWithRuns.has(`${t.repo}||${t.branch}`));
+
+    // Fetch commit history for all repo/branches (needed for commit dates + fallback Konflux lookup)
+    const allUniqueBranches = [...new Set(tasks.map(t => `${t.repo}||${t.branch}`))];
     if (allUniqueBranches.length > 0 && !rateLimited) {
         const allHistoryUrls = allUniqueBranches.map(key => {
             const [repo, branch] = key.split('||');
@@ -736,6 +682,80 @@ async function loadBuildData() {
             (done, total) => { if (!rateLimited) progress.textContent = `Fetching commit history: ${done} / ${total}...`; },
             () => { rateLimited = true; }
         );
+    }
+
+    // Phase 1b: For repos with no Konflux runs on HEAD, scan recent commits
+    if (reposWithoutRuns.length > 0 && !rateLimited) {
+        progress.textContent = `Scanning recent commits for ${reposWithoutRuns.length} repo(s) without Konflux runs on HEAD...`;
+        const fallbackUrls = [];
+        for (const { repo, branch } of reposWithoutRuns) {
+            const histKey = `https://api.github.com/repos/${ORG}/${repo}/commits?sha=${encodeURIComponent(branch)}&per_page=50`;
+            const commits = apiCache.get(histKey);
+            if (!commits || !Array.isArray(commits)) continue;
+            // Check up to 10 recent commits for Konflux runs
+            for (let i = 1; i < Math.min(commits.length, 10); i++) {
+                fallbackUrls.push(`https://api.github.com/repos/${ORG}/${repo}/commits/${commits[i].sha}/check-runs?per_page=100`);
+            }
+        }
+        if (fallbackUrls.length > 0) {
+            await batchFetch(fallbackUrls, headers, token ? 10 : 5, token ? 100 : 1500,
+                (done, total) => { if (!rateLimited) progress.textContent = `Scanning for Konflux runs: ${done} / ${total}...`; },
+                () => { rateLimited = true; }
+            );
+        }
+        // Process fallback results — find the most recent commit with Konflux runs for each repo/branch
+        for (const { repo, branch } of reposWithoutRuns) {
+            const histKey = `https://api.github.com/repos/${ORG}/${repo}/commits?sha=${encodeURIComponent(branch)}&per_page=50`;
+            const commits = apiCache.get(histKey);
+            if (!commits || !Array.isArray(commits)) continue;
+            let foundRuns = null;
+            let foundSha = '';
+            for (let i = 1; i < Math.min(commits.length, 10); i++) {
+                const checkKey = `https://api.github.com/repos/${ORG}/${repo}/commits/${commits[i].sha}/check-runs?per_page=100`;
+                const data = apiCache.get(checkKey);
+                if (!data?.check_runs) continue;
+                const konfluxRuns = data.check_runs.filter(r => r.name.includes('Konflux') || r.name.includes('konflux'));
+                if (konfluxRuns.length > 0) {
+                    foundRuns = { check_runs: konfluxRuns };
+                    foundSha = commits[i].sha;
+                    break;
+                }
+            }
+            if (foundRuns) {
+                // Use HEAD commit as latestCommit so pin mismatch comparison works
+                const latestCommit = commits[0].sha;
+                const item = { branch, org: ORG, repo, runs: foundRuns, latestCommit };
+                // Re-use the same dedup + mapping logic
+                const allKonflux = foundRuns.check_runs;
+                const productionRuns = allKonflux.filter(r => r.name.toLowerCase().includes('production'));
+                const productionSuffixes = new Set(productionRuns.map(r => {
+                    const sep = r.name.indexOf('/');
+                    return sep >= 0 ? r.name.slice(sep + 1).trim().toLowerCase() : r.name.toLowerCase();
+                }));
+                const dedupedRuns = allKonflux.filter(run => {
+                    const isProduction = run.name.toLowerCase().includes('production');
+                    if (isProduction) return true;
+                    const sep = run.name.indexOf('/');
+                    const suffix = sep >= 0 ? run.name.slice(sep + 1).trim().toLowerCase() : run.name.toLowerCase();
+                    return !productionSuffixes.has(suffix);
+                });
+                for (const run of dedupedRuns) {
+                    const separator = run.name.indexOf('/');
+                    const testName = separator >= 0 ? run.name.slice(separator + 1).trim() : run.name;
+                    const conclusion = (run.conclusion || '').toLowerCase();
+                    const runSucceeded = conclusion === 'success' || conclusion === 'succeeded';
+                    prelimData.push({
+                        branch, repo, name: run.name,
+                        status: run.output?.title || run.conclusion || run.status,
+                        started: run.started_at ? new Date(run.started_at).toLocaleString() : '',
+                        org: ORG, commitSha: run.head_sha, testName, runUrl: run.html_url,
+                        latest: latestCommit,
+                        success: runSucceeded ? (run.head_sha || '') : '',
+                        rebuildNeeded: !runSucceeded, runSucceeded,
+                    });
+                }
+            }
+        }
     }
 
     // Phase 2: For failed runs, look up last success in commit history (up to 50 commits back)
@@ -807,33 +827,26 @@ async function loadBuildData() {
         }
     }
 
-    // Phase 3: Fetch pinned commits from rhods-operator manifests and RHOAI-Build-Config catalog
-    progress.textContent = 'Fetching pinned commit references...';
+    // Phase 3: Fetch pinned commits from rhods-operator manifests
+    progress.textContent = 'Fetching manifest pins...';
     manifestCache.clear();
-    catalogCache.clear();
     const uniqueBranchNames = [...new Set(prelimData.map(r => r.branch))];
-    const manifestMaps = new Map(); // branch -> Map<repo, Array<{commit, line, source}>>
-    const catalogMaps = new Map();
-    await Promise.allSettled(uniqueBranchNames.flatMap(branch => [
-        fetchManifestPins(branch).then(pins => manifestMaps.set(branch, pins)),
-        fetchCatalogPins(branch).then(pins => catalogMaps.set(branch, pins)),
-    ]));
+    const manifestMaps = new Map();
+    await Promise.allSettled(uniqueBranchNames.map(branch =>
+        fetchManifestPins(branch).then(pins => manifestMaps.set(branch, pins))
+    ));
 
-    // Attach pinned commits to each row (merge both sources, group by commit SHA)
+    // Attach pinned commits to each row
     for (const item of prelimData) {
-        const byCommit = new Map(); // commit SHA -> { commit, sources: [{ source, line }] }
-        for (const [, maps] of [['manifest', manifestMaps], ['catalog', catalogMaps]]) {
-            const pins = maps.get(item.branch);
-            if (pins && pins.has(item.repo)) {
-                for (const p of pins.get(item.repo)) {
-                    if (!byCommit.has(p.commit)) {
-                        byCommit.set(p.commit, { commit: p.commit, sources: [] });
-                    }
-                    byCommit.get(p.commit).sources.push({ source: p.source, line: p.line });
-                }
-            }
+        const pins = manifestMaps.get(item.branch);
+        if (pins && pins.has(item.repo)) {
+            item.pinnedCommits = pins.get(item.repo).map(p => ({
+                commit: p.commit,
+                sources: [{ source: p.source, line: p.line }],
+            }));
+        } else {
+            item.pinnedCommits = [];
         }
-        item.pinnedCommits = [...byCommit.values()];
     }
 
     // Fetch commit dates for pinned SHAs not already in cache
@@ -893,7 +906,6 @@ async function loadBuildData() {
             const pinMismatch = item.pinnedCommits.length > 0 && item.latest
                 && !item.pinnedCommits.some(p => p.commit === item.latest);
             const manifestFileBase = `https://github.com/${ORG}/rhods-operator/blob/${encodeURIComponent(item.branch)}/build/manifests-config.yaml`;
-            const catalogFileBase = `https://github.com/${ORG}/RHOAI-Build-Config/blob/${encodeURIComponent(item.branch)}/catalog/catalog_build_args.map`;
             const pinnedHtml = item.pinnedCommits.length > 0
                 ? item.pinnedCommits.map(p => {
                     const isSha = /^[a-f0-9]{7,40}$/.test(p.commit);
@@ -903,10 +915,9 @@ async function loadBuildData() {
                         : `<span style="color:#c00;font-style:italic" title="Not a commit SHA">${escapeHtml(p.commit)}</span>`;
                     const pinDate = isSha ? findCommitDateFromCache(item.repo, item.branch, p.commit) : null;
                     const badges = p.sources.map(s => {
-                        const fileBase = s.source === 'catalog' ? catalogFileBase : manifestFileBase;
                         const lineAnchor = s.line ? `#L${s.line}` : '';
-                        const lineHref = escapeHtml(`${fileBase}${lineAnchor}`);
-                        return `<a href="${lineHref}" target="_blank" rel="noopener noreferrer" class="source-badge ${s.source}">${s.source}</a>`;
+                        const lineHref = escapeHtml(`${manifestFileBase}${lineAnchor}`);
+                        return `<a href="${lineHref}" target="_blank" rel="noopener noreferrer" class="source-badge manifest">manifest</a>`;
                     }).join(' ');
                     return `<div class="pin-entry">`
                         + commitDisplay + ' '
