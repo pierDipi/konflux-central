@@ -136,6 +136,13 @@
 
 <script>
 const ORG = 'red-hat-data-services';
+const CATALOG_BUILD_CONFIG_REPO = 'RHOAI-Build-Config';
+
+function normalizeRhoaiVersion(branch) {
+    return branch
+        .replace(/^rhoai-/, '')
+        .replace(/\./g, '');
+}
 
 const REPOSITORIES = [
     'MLServer',
@@ -192,6 +199,7 @@ const REPOSITORIES = [
     'ray-module-operator',
     'rhai-db-operator',
     'rhaii-cluster-validation',
+    'RHOAI-Build-Config',
     'rhoai-mcp',
     'rhods-operator',
     'spark-operator',
@@ -593,6 +601,10 @@ async function loadBuildData() {
 
     const results = [];
 
+    const mainCatalogTasks = selectedRepos.includes(CATALOG_BUILD_CONFIG_REPO)
+        ? branches.filter(branch => branch !== 'main')
+        : [];
+
     // Process in batches to avoid rate limits
     const tasks = selectedRepos.flatMap(repo =>
         branches.map(branch => ({ repo, branch }))
@@ -637,6 +649,44 @@ async function loadBuildData() {
     }
 
     if (rateLimited && results.length === 0) return;
+
+    if (mainCatalogTasks.length > 0 && !rateLimited) {
+        progress.textContent = `Fetching main catalog builds for ${mainCatalogTasks.length} branch(es)...`;
+        const mainCatalogResults = await Promise.allSettled(mainCatalogTasks.map(async ({ branch }) => {
+            try {
+                const commitUrl = `https://api.github.com/repos/${ORG}/${CATALOG_BUILD_CONFIG_REPO}/commits`
+                    + `?sha=main&path=catalog/${encodeURIComponent(branch)}/&per_page=1`;
+                const commitRes = await fetch(commitUrl, { headers });
+                if (!commitRes.ok) return null;
+                const commits = await commitRes.json();
+                const commit = commits?.[0];
+                if (!commit) return null;
+
+                const checkRunsUrl = `https://api.github.com/repos/${ORG}/${CATALOG_BUILD_CONFIG_REPO}`
+                    + `/commits/${commit.sha}/check-runs?per_page=100&_=${Date.now()}`;
+                const checkRunsRes = await fetch(checkRunsUrl, { headers });
+                if (!checkRunsRes.ok) return null;
+                const runs = await checkRunsRes.json();
+                const releaseVersion = normalizeRhoaiVersion(branch);
+                runs.check_runs = (runs.check_runs || [])
+                    .filter(run => run.name.includes(`rhoai-${releaseVersion}`));
+
+                return {
+                    branch: 'main',
+                    releaseBranch: branch,
+                    org: ORG,
+                    repo: CATALOG_BUILD_CONFIG_REPO,
+                    runs,
+                    latestCommit: commit.sha,
+                };
+            } catch {
+                return null;
+            }
+        }));
+        mainCatalogResults.forEach(result => {
+            if (result.status === 'fulfilled' && result.value) results.push(result.value);
+        });
+    }
 
     progress.textContent = 'Processing results...';
 
