@@ -62,6 +62,8 @@
     .source-badge { display: inline-block; font-size: 10px; padding: 1px 5px; border-radius: 3px; color: #fff; text-decoration: none; }
     .source-badge.manifest { background: #6f42c1; }
     .source-badge.manifest:hover { background: #5a32a3; }
+    .source-badge.build-config { background: #0969da; }
+    .source-badge.build-config:hover { background: #0757b5; }
 </style>
 <link rel="stylesheet" href="https://cdn.datatables.net/2.1.8/css/dataTables.dataTables.css" integrity="sha384-eCorNQ6xLKDT9aok8iCYVVP8S813O3kaugZFLBt1YhfR80d1ZgkNcf2ghiTRzRno" crossorigin="anonymous" />
 </head>
@@ -232,6 +234,7 @@ function safeGitHubUrl(url) {
 // Returns a Map: repo name (e.g. "kserve") -> Set of pinned commit SHAs.
 // Memoized per branch in manifestCache.
 const manifestCache = new Map();
+const catalogBuildConfigCache = new Map();
 
 async function fetchManifestPins(branch) {
     if (manifestCache.has(branch)) return manifestCache.get(branch);
@@ -280,6 +283,47 @@ async function fetchManifestPins(branch) {
     })();
 
     manifestCache.set(branch, promise);
+    return promise;
+}
+
+// Fetch catalog_build_args.map from RHOAI-Build-Config for a given branch.
+// Returns a Map: repo name (e.g. "kserve") -> array of pinned commits.
+async function fetchCatalogBuildConfigPins(branch) {
+    if (catalogBuildConfigCache.has(branch)) return catalogBuildConfigCache.get(branch);
+
+    const url = `https://raw.githubusercontent.com/${ORG}/${CATALOG_BUILD_CONFIG_REPO}/${encodeURIComponent(branch)}/catalog/catalog_build_args.map`;
+    const promise = (async () => {
+        try {
+            const res = await fetch(url);
+            if (!res.ok) return new Map();
+            const lines = (await res.text()).split('\n');
+            const pins = new Map();
+            lines.forEach((line, idx) => {
+                const commitMatch = line.match(/^([A-Z0-9_]+)_GIT_COMMIT=(\S+)/);
+                if (!commitMatch) return;
+
+                const [, variablePrefix, commit] = commitMatch;
+                const urlLine = lines[idx + 1] || '';
+                const urlMatch = urlLine.match(new RegExp(`^${variablePrefix}_GIT_URL=(\\S+)`));
+                if (!urlMatch) return;
+
+                const repoMatch = urlMatch[1].match(/github\.com\/[^/]+\/([^/]+?)(?:\.git)?$/);
+                if (!repoMatch) return;
+
+                const repoName = repoMatch[1];
+                if (!pins.has(repoName)) pins.set(repoName, []);
+                const existing = pins.get(repoName);
+                if (!existing.some(entry => entry.commit === commit)) {
+                    existing.push({ commit, line: idx + 1, source: 'build-config' });
+                }
+            });
+            return pins;
+        } catch {
+            return new Map();
+        }
+    })();
+
+    catalogBuildConfigCache.set(branch, promise);
     return promise;
 }
 
@@ -899,26 +943,41 @@ async function loadBuildData() {
         }
     }
 
-    // Phase 3: Fetch pinned commits from rhods-operator manifests
-    progress.textContent = 'Fetching manifest pins...';
+    // Phase 3: Fetch pinned commits from manifest and catalog build config
+    progress.textContent = 'Fetching pinned commits...';
     manifestCache.clear();
+    catalogBuildConfigCache.clear();
     const uniqueBranchNames = [...new Set(prelimData.map(r => r.branch))];
     const manifestMaps = new Map();
+    const catalogBuildConfigMaps = new Map();
     await Promise.allSettled(uniqueBranchNames.map(branch =>
-        fetchManifestPins(branch).then(pins => manifestMaps.set(branch, pins))
+        Promise.all([
+            fetchManifestPins(branch),
+            fetchCatalogBuildConfigPins(branch),
+        ]).then(([manifestPins, catalogBuildConfigPins]) => {
+            manifestMaps.set(branch, manifestPins);
+            catalogBuildConfigMaps.set(branch, catalogBuildConfigPins);
+        })
     ));
 
     // Attach pinned commits to each row
     for (const item of prelimData) {
-        const pins = manifestMaps.get(item.branch);
-        if (pins && pins.has(item.repo)) {
-            item.pinnedCommits = pins.get(item.repo).map(p => ({
-                commit: p.commit,
-                sources: [{ source: p.source, line: p.line }],
-            }));
-        } else {
-            item.pinnedCommits = [];
-        }
+        const allPins = [
+            ...(manifestMaps.get(item.branch)?.get(item.repo) || []),
+            ...(catalogBuildConfigMaps.get(item.branch)?.get(item.repo) || []),
+        ];
+        item.pinnedCommits = allPins.reduce((entries, pin) => {
+            const existing = entries.find(entry => entry.commit === pin.commit);
+            if (existing) {
+                existing.sources.push({ source: pin.source, line: pin.line });
+            } else {
+                entries.push({
+                    commit: pin.commit,
+                    sources: [{ source: pin.source, line: pin.line }],
+                });
+            }
+            return entries;
+        }, []);
     }
 
     // Fetch commit dates for pinned SHAs not already in cache
@@ -978,6 +1037,7 @@ async function loadBuildData() {
             const pinMismatch = item.pinnedCommits.length > 0 && item.latest
                 && !item.pinnedCommits.some(p => p.commit === item.latest);
             const manifestFileBase = `https://github.com/${ORG}/rhods-operator/blob/${encodeURIComponent(item.branch)}/build/manifests-config.yaml`;
+            const buildConfigFileBase = `https://github.com/${ORG}/${CATALOG_BUILD_CONFIG_REPO}/blob/${encodeURIComponent(item.branch)}/catalog/catalog_build_args.map`;
             const pinnedHtml = item.pinnedCommits.length > 0
                 ? item.pinnedCommits.map(p => {
                     const isSha = /^[a-f0-9]{7,40}$/.test(p.commit);
@@ -987,9 +1047,10 @@ async function loadBuildData() {
                         : `<span style="color:#c00;font-style:italic" title="Not a commit SHA">${escapeHtml(p.commit)}</span>`;
                     const pinDate = isSha ? findCommitDateFromCache(item.repo, item.branch, p.commit) : null;
                     const badges = p.sources.map(s => {
+                        const fileBase = s.source === 'build-config' ? buildConfigFileBase : manifestFileBase;
                         const lineAnchor = s.line ? `#L${s.line}` : '';
-                        const lineHref = escapeHtml(`${manifestFileBase}${lineAnchor}`);
-                        return `<a href="${lineHref}" target="_blank" rel="noopener noreferrer" class="source-badge manifest">manifest</a>`;
+                        const lineHref = escapeHtml(`${fileBase}${lineAnchor}`);
+                        return `<a href="${lineHref}" target="_blank" rel="noopener noreferrer" class="source-badge ${s.source}">${s.source}</a>`;
                     }).join(' ');
                     return `<div class="pin-entry">`
                         + commitDisplay + ' '
