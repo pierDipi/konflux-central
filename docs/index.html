@@ -64,6 +64,17 @@
     .source-badge.manifest:hover { background: #5a32a3; }
     .source-badge.build-config { background: #0969da; }
     .source-badge.build-config:hover { background: #0757b5; }
+    .source-badge.bundle { background: #2da44e; }
+    .source-badge.bundle:hover { background: #2c8a45; }
+    .pickup-badge { display: inline-block; font-size: 10px; padding: 1px 5px; border-radius: 3px; color: #fff; text-decoration: none; vertical-align: baseline; }
+    .pickup-badge.in-fbc { background: #22863a; }
+    .pickup-badge.in-fbc:hover { background: #1d7431; }
+    .pickup-badge.waiting-for-fbc { background: #b8860b; }
+    .pickup-badge.waiting-for-fbc:hover { background: #9a700a; }
+    .pickup-badge.waiting-for-bundle { background: #d18527; }
+    .pickup-badge.waiting-for-bundle:hover { background: #b37020; }
+    .pickup-badge.source-not-green { background: #c00; }
+    .pickup-badge.no-bundle-pin { background: #6c757d; }
 </style>
 <link rel="stylesheet" href="https://cdn.datatables.net/2.1.8/css/dataTables.dataTables.css" integrity="sha384-eCorNQ6xLKDT9aok8iCYVVP8S813O3kaugZFLBt1YhfR80d1ZgkNcf2ghiTRzRno" crossorigin="anonymous" />
 </head>
@@ -235,6 +246,7 @@ function safeGitHubUrl(url) {
 // Memoized per branch in manifestCache.
 const manifestCache = new Map();
 const catalogBuildConfigCache = new Map();
+const bundleBuildConfigCache = new Map();
 
 async function fetchManifestPins(branch) {
     if (manifestCache.has(branch)) return manifestCache.get(branch);
@@ -286,45 +298,89 @@ async function fetchManifestPins(branch) {
     return promise;
 }
 
-// Fetch catalog_build_args.map from RHOAI-Build-Config for a given branch.
-// Returns a Map: repo name (e.g. "kserve") -> array of pinned commits.
-async function fetchCatalogBuildConfigPins(branch) {
-    if (catalogBuildConfigCache.has(branch)) return catalogBuildConfigCache.get(branch);
+function parseBuildArgsPins(text, source) {
+    const lines = text.split('\n');
+    const pins = new Map();
+    const entries = new Map();
+    lines.forEach((line, idx) => {
+        const valueMatch = line.match(/^([A-Z0-9_]+)_(GIT_COMMIT|GIT_URL)=(\S+)$/);
+        if (!valueMatch) return;
 
-    const url = `https://raw.githubusercontent.com/${ORG}/${CATALOG_BUILD_CONFIG_REPO}/${encodeURIComponent(branch)}/catalog/catalog_build_args.map`;
-    const promise = (async () => {
-        try {
-            const res = await fetch(url);
-            if (!res.ok) return new Map();
-            const lines = (await res.text()).split('\n');
-            const pins = new Map();
-            lines.forEach((line, idx) => {
-                const commitMatch = line.match(/^([A-Z0-9_]+)_GIT_COMMIT=(\S+)/);
-                if (!commitMatch) return;
+        const [, variablePrefix, kind, value] = valueMatch;
+        if (!entries.has(variablePrefix)) entries.set(variablePrefix, {});
+        entries.get(variablePrefix)[kind] = { value, line: idx + 1 };
+    });
 
-                const [, variablePrefix, commit] = commitMatch;
-                const urlLine = lines[idx + 1] || '';
-                const urlMatch = urlLine.match(new RegExp(`^${variablePrefix}_GIT_URL=(\\S+)`));
-                if (!urlMatch) return;
+    for (const [, entry] of entries) {
+        if (!entry.GIT_COMMIT || !entry.GIT_URL) continue;
 
-                const repoMatch = urlMatch[1].match(/github\.com\/[^/]+\/([^/]+?)(?:\.git)?$/);
-                if (!repoMatch) return;
+        const commit = entry.GIT_COMMIT.value;
+        const repoMatch = entry.GIT_URL.value.match(/github\.com\/[^/]+\/([^/]+?)(?:\.git)?$/);
+        if (!repoMatch) continue;
 
-                const repoName = repoMatch[1];
-                if (!pins.has(repoName)) pins.set(repoName, []);
-                const existing = pins.get(repoName);
-                if (!existing.some(entry => entry.commit === commit)) {
-                    existing.push({ commit, line: idx + 1, source: 'build-config' });
-                }
-            });
-            return pins;
-        } catch {
-            return new Map();
+        const repoName = repoMatch[1];
+        if (!pins.has(repoName)) pins.set(repoName, []);
+        const existing = pins.get(repoName);
+        if (!existing.some(existingEntry => existingEntry.commit === commit)) {
+            existing.push({ commit, line: entry.GIT_COMMIT.line, source });
         }
-    })();
+    }
+    return pins;
+}
 
-    catalogBuildConfigCache.set(branch, promise);
+async function fetchBuildArgsPins(branch, path, cache, source) {
+    if (cache.has(branch)) return cache.get(branch);
+
+    const url = `https://raw.githubusercontent.com/${ORG}/${CATALOG_BUILD_CONFIG_REPO}/${encodeURIComponent(branch)}/${path}`;
+    const promise = fetch(url)
+        .then(res => (res.ok ? res.text() : ''))
+        .then(text => parseBuildArgsPins(text, source))
+        .catch(() => new Map());
+
+    cache.set(branch, promise);
     return promise;
+}
+
+function fetchCatalogBuildConfigPins(branch) {
+    return fetchBuildArgsPins(branch, 'catalog/catalog_build_args.map', catalogBuildConfigCache, 'build-config');
+}
+
+function fetchBundleBuildConfigPins(branch) {
+    return fetchBuildArgsPins(branch, 'bundle/bundle_build_args.map', bundleBuildConfigCache, 'bundle');
+}
+
+function renderPickupStatus(item, catalogPins, bundlePins, catalogFileBase, bundleFileBase) {
+    if (!item.latest) return '';
+
+    const catalogPin = catalogPins.find(pin => pin.commit === item.latest);
+    const bundlePin = bundlePins.find(pin => pin.commit === item.latest);
+    const lineAnchor = pin => (pin?.line ? `#L${pin.line}` : '');
+
+    if (catalogPin) {
+        const href = escapeHtml(`${catalogFileBase}${lineAnchor(catalogPin)}`);
+        return `<a href="${href}" target="_blank" rel="noopener noreferrer" class="pickup-badge in-fbc" title="Latest commit is referenced by catalog/catalog_build_args.map.">in FBC</a>`;
+    }
+
+    if (bundlePin) {
+        const catalogCommit = catalogPins[0]?.commit || bundlePin.commit;
+        const message = `Latest commit is in bundle/bundle_build_args.map, but catalog/catalog_build_args.map still pins ${catalogCommit.slice(0, 7)}. A newer operator-bundle snapshot and FBC regeneration are needed.`;
+        const href = escapeHtml(`${bundleFileBase}${lineAnchor(bundlePin)}`);
+        return `<a href="${href}" target="_blank" rel="noopener noreferrer" class="pickup-badge waiting-for-fbc" title="${escapeHtml(message)}">waiting for FBC</a>`;
+    }
+
+    const sourceSuccessful = /success|succeed/i.test(item.status || '');
+    if (!sourceSuccessful) {
+        return `<span class="pickup-badge source-not-green" title="Latest source check is not successful; Build-Config will not pick it up yet.">source not green</span>`;
+    }
+
+    if (bundlePins.length > 0) {
+        const bundleCommit = bundlePins[0].commit;
+        const message = `Latest commit is not in bundle/bundle_build_args.map; Build-Config still pins ${bundleCommit.slice(0, 7)}.`;
+        const href = escapeHtml(`${bundleFileBase}${lineAnchor(bundlePins[0])}`);
+        return `<a href="${href}" target="_blank" rel="noopener noreferrer" class="pickup-badge waiting-for-bundle" title="${escapeHtml(message)}">waiting for bundle</a>`;
+    }
+
+    return `<span class="pickup-badge no-bundle-pin" title="No Build-Config bundle pin was found for this repository.">no bundle pin</span>`;
 }
 
 // Toast notification: type = 'success' | 'error' | 'info' | 'warn'
@@ -943,20 +999,24 @@ async function loadBuildData() {
         }
     }
 
-    // Phase 3: Fetch pinned commits from manifest and catalog build config
+    // Phase 3: Fetch pinned commits from manifest and Build-Config metadata
     progress.textContent = 'Fetching pinned commits...';
     manifestCache.clear();
     catalogBuildConfigCache.clear();
+    bundleBuildConfigCache.clear();
     const uniqueBranchNames = [...new Set(prelimData.map(r => r.branch))];
     const manifestMaps = new Map();
     const catalogBuildConfigMaps = new Map();
+    const bundleBuildConfigMaps = new Map();
     await Promise.allSettled(uniqueBranchNames.map(branch =>
         Promise.all([
             fetchManifestPins(branch),
             fetchCatalogBuildConfigPins(branch),
-        ]).then(([manifestPins, catalogBuildConfigPins]) => {
+            fetchBundleBuildConfigPins(branch),
+        ]).then(([manifestPins, catalogBuildConfigPins, bundleBuildConfigPins]) => {
             manifestMaps.set(branch, manifestPins);
             catalogBuildConfigMaps.set(branch, catalogBuildConfigPins);
+            bundleBuildConfigMaps.set(branch, bundleBuildConfigPins);
         })
     ));
 
@@ -965,6 +1025,7 @@ async function loadBuildData() {
         const allPins = [
             ...(manifestMaps.get(item.branch)?.get(item.repo) || []),
             ...(catalogBuildConfigMaps.get(item.branch)?.get(item.repo) || []),
+            ...(bundleBuildConfigMaps.get(item.branch)?.get(item.repo) || []),
         ];
         item.pinnedCommits = allPins.reduce((entries, pin) => {
             const existing = entries.find(entry => entry.commit === pin.commit);
@@ -1023,8 +1084,21 @@ async function loadBuildData() {
             const branchLink = `<a href="${branchHref}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.branch)}</a>`;
             const latestDate = findCommitDateFromCache(item.repo, item.branch, item.latest);
             const latestMsg = escapeHtml(buildCommitTooltip(item.repo, item.branch, item.latest));
+            const manifestFileBase = `https://github.com/${ORG}/rhods-operator/blob/${encodeURIComponent(item.branch)}/build/manifests-config.yaml`;
+            const buildConfigFileBase = `https://github.com/${ORG}/${CATALOG_BUILD_CONFIG_REPO}/blob/${encodeURIComponent(item.branch)}/catalog/catalog_build_args.map`;
+            const bundleFileBase = `https://github.com/${ORG}/${CATALOG_BUILD_CONFIG_REPO}/blob/${encodeURIComponent(item.branch)}/bundle/bundle_build_args.map`;
+            const catalogPickupPins = catalogBuildConfigMaps.get(item.branch)?.get(item.repo) || [];
+            const bundlePickupPins = bundleBuildConfigMaps.get(item.branch)?.get(item.repo) || [];
+            const pickupStatus = renderPickupStatus(
+                item,
+                catalogPickupPins,
+                bundlePickupPins,
+                buildConfigFileBase,
+                bundleFileBase
+            );
             const latestLink = item.latest
                 ? `<div class="commit-cell"><a href="${escapeHtml(`${repoBase}/commit/${encodeURIComponent(item.latest)}`)}" target="_blank" rel="noopener noreferrer" title="${latestMsg}">${escapeHtml(item.latest.slice(0, 7))}</a>`
+                    + pickupStatus
                     + renderDateSpan(latestDate) + '</div>'
                 : '';
             const successDate = findCommitDateFromCache(item.repo, item.branch, item.success);
@@ -1034,10 +1108,8 @@ async function loadBuildData() {
                     + renderDateSpan(successDate) + '</div>'
                 : '';
             // Pinned commits: flag mismatch on raw data, link to source file
-            const pinMismatch = item.pinnedCommits.length > 0 && item.latest
-                && !item.pinnedCommits.some(p => p.commit === item.latest);
-            const manifestFileBase = `https://github.com/${ORG}/rhods-operator/blob/${encodeURIComponent(item.branch)}/build/manifests-config.yaml`;
-            const buildConfigFileBase = `https://github.com/${ORG}/${CATALOG_BUILD_CONFIG_REPO}/blob/${encodeURIComponent(item.branch)}/catalog/catalog_build_args.map`;
+            const pinMismatch = catalogPickupPins.length > 0 && item.latest
+                && !catalogPickupPins.some(p => p.commit === item.latest);
             const pinnedHtml = item.pinnedCommits.length > 0
                 ? item.pinnedCommits.map(p => {
                     const isSha = /^[a-f0-9]{7,40}$/.test(p.commit);
@@ -1047,7 +1119,12 @@ async function loadBuildData() {
                         : `<span style="color:#c00;font-style:italic" title="Not a commit SHA">${escapeHtml(p.commit)}</span>`;
                     const pinDate = isSha ? findCommitDateFromCache(item.repo, item.branch, p.commit) : null;
                     const badges = p.sources.map(s => {
-                        const fileBase = s.source === 'build-config' ? buildConfigFileBase : manifestFileBase;
+                        const sourceFileBases = {
+                            manifest: manifestFileBase,
+                            'build-config': buildConfigFileBase,
+                            bundle: bundleFileBase,
+                        };
+                        const fileBase = sourceFileBases[s.source] || manifestFileBase;
                         const lineAnchor = s.line ? `#L${s.line}` : '';
                         const lineHref = escapeHtml(`${fileBase}${lineAnchor}`);
                         return `<a href="${lineHref}" target="_blank" rel="noopener noreferrer" class="source-badge ${s.source}">${s.source}</a>`;
